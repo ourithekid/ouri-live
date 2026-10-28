@@ -13,6 +13,35 @@ const st = () => getStore({ name: "ouri-private", consistency: "strong" });
 const J = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 const sha = s => crypto.createHash("sha256").update(String(s)).digest("hex");
 const KEEP = 300, SHOW = 80, GAP = 2000;
+// ---- permanent archive: every message is also kept in one blob per day ("arch/YYYY-MM-DD"), never trimmed ----
+const dayOf = t => new Date(t).toISOString().slice(0, 10);
+const idTime = id => { const n = parseInt(String(id).slice(0, 8), 36); return Number.isFinite(n) ? n : 0; };
+async function archAdd(s, msgs) {
+  const by = {}; for (const m of msgs) (by[dayOf(m.t)] ||= []).push(m);
+  for (const [d, add] of Object.entries(by)) {
+    const cur = (await s.get("arch/" + d, { type: "json" })) || [], seen = new Set(cur.map(m => m.id));
+    for (const m of add) if (!seen.has(m.id)) cur.push(m);
+    cur.sort((a, b) => a.t - b.t); await s.setJSON("arch/" + d, cur);
+  }
+}
+async function migrate(s) { // one time: copy whatever is in the live list into the archive
+  if (await s.get("arch-migrated", { type: "json" })) return;
+  const list = (await s.get("chat", { type: "json" })) || []; if (list.length) await archAdd(s, list);
+  await s.setJSON("arch-migrated", { t: Date.now() });
+}
+const clearedAt = async s => ((await s.get("clearedAt", { type: "json" })) || {}).t || 0;
+async function archBefore(s, before, limit) { // newest first walk back through the day files
+  await migrate(s); const cut = await clearedAt(s);
+  const { blobs } = await s.list({ prefix: "arch/" });
+  const days = blobs.map(b => b.key.slice(5)).filter(d => d <= dayOf(before) && d >= dayOf(cut)).sort().reverse();
+  let out = [], more = false;
+  for (let i = 0; i < days.length; i++) {
+    const arr = ((await s.get("arch/" + days[i], { type: "json" })) || []).filter(m => m.t < before && m.t > cut);
+    out = arr.concat(out);
+    if (out.length >= limit) { more = out.length > limit || i < days.length - 1; out = out.slice(-limit); break; }
+  }
+  return { out, more };
+}
 
 async function sessionUser(req, s) {
   const m = (req.headers.get("cookie") || "").match(/(?:^|;\s*)ouri_sess=([a-f0-9]{64})/); if (!m) return null;
@@ -26,9 +55,16 @@ export default async (req) => {
   const owner = isOwnerReq(req);
 
   if (req.method === "GET") {
+    const q = new URL(req.url).searchParams;
+    if (q.has("before")) {
+      const before = Number(q.get("before")) || Date.now(), limit = Math.max(1, Math.min(Number(q.get("limit")) || 50, 100));
+      const { out, more } = await archBefore(s, before, limit);
+      return J({ older: out.map(m => owner ? m : { id: m.id, name: m.name, text: m.text, t: m.t, badge: m.badge }), more });
+    }
     const me = await sessionUser(req, s);
     const mutes = activeMutes(await s.get("mutes", { type: "json" }));
-    const msgs = ((await s.get("chat", { type: "json" })) || []).slice(-SHOW);
+    const cut = await clearedAt(s);
+    const msgs = ((await s.get("chat", { type: "json" })) || []).filter(m => m.t > cut).slice(-SHOW);
     const out = msgs.map(m => owner ? m : { id: m.id, name: m.name, text: m.text, t: m.t, badge: m.badge });
     const r = { messages: out, me: me ? { id: me.id, name: me.name, mutedUntil: mutes[me.id] ? (mutes[me.id].until || -1) : 0 } : null };
     if (owner) r.mutes = Object.entries(mutes).map(([uid, v]) => ({ uid, name: v.name, until: v.until || 0 }));
@@ -41,11 +77,27 @@ export default async (req) => {
   if (!b || typeof b !== "object") return J({ error: "Bad request." }, 400);
 
   // ---- moderation (owner key required) ----
-  if (b.op === "delete" || b.op === "mute" || b.op === "unmute") {
+  if (["delete", "mute", "unmute", "clear", "erase", "purge"].includes(b.op)) {
     if (!owner) return J({ error: "owner only" }, 403);
     if (b.op === "delete") {
       const list = (await s.get("chat", { type: "json" })) || [];
-      await s.setJSON("chat", list.filter(m => m.id !== String(b.id))); return J({ ok: true });
+      await s.setJSON("chat", list.filter(m => m.id !== String(b.id)));
+      const d = dayOf(idTime(b.id) || Date.now()), day = (await s.get("arch/" + d, { type: "json" })) || [];
+      if (day.length) await s.setJSON("arch/" + d, day.filter(m => m.id !== String(b.id)));
+      return J({ ok: true });
+    }
+    if (b.op === "clear") { await s.setJSON("clearedAt", { t: Date.now() }); return J({ ok: true }); } // hides everything older; archive is kept
+    if (b.op === "erase") { // wipes the live chat AND the permanent history
+      await s.setJSON("chat", []); await s.setJSON("clearedAt", { t: Date.now() });
+      const { blobs } = await s.list({ prefix: "arch/" }); for (const x of blobs) await s.delete(x.key);
+      return J({ ok: true });
+    }
+    if (b.op === "purge") { // remove every message from one person
+      const uid = String(b.uid || ""); if (!/^[a-f0-9]{16}$/.test(uid)) return J({ error: "uid" }, 400);
+      await s.setJSON("chat", ((await s.get("chat", { type: "json" })) || []).filter(m => m.uid !== uid));
+      const { blobs } = await s.list({ prefix: "arch/" });
+      for (const x of blobs) { const arr = (await s.get(x.key, { type: "json" })) || []; const keep = arr.filter(m => m.uid !== uid); if (keep.length !== arr.length) await s.setJSON(x.key, keep); }
+      return J({ ok: true });
     }
     const mutes = (await s.get("mutes", { type: "json" })) || {};
     if (b.op === "mute") {
@@ -70,5 +122,6 @@ export default async (req) => {
   const msg = { id: Date.now().toString(36) + crypto.randomBytes(3).toString("hex"), uid: me.id, name: me.name, text, t: Date.now(), badge: owner ? "OWNER" : "" };
   const list = (await s.get("chat", { type: "json" })) || [];
   list.push(msg); await s.setJSON("chat", list.slice(-KEEP));
+  await migrate(s); await archAdd(s, [msg]);
   return J({ ok: true, message: { id: msg.id, name: msg.name, text: msg.text, t: msg.t, badge: msg.badge } });
 };
