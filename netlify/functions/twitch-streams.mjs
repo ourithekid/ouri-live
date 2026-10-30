@@ -28,7 +28,7 @@ async function viaHelix() {
 }
 
 async function viaGql() {
-  const q = 'query{game(name:"IRL"){streams(first:24,options:{sort:VIEWER_COUNT,broadcasterLanguages:["EN"]}){edges{node{title viewersCount broadcaster{login displayName}}}}}}';
+  const q = 'query{game(name:"IRL"){streams(first:24,options:{sort:VIEWER_COUNT,broadcasterLanguages:[EN]}){edges{node{title viewersCount broadcaster{login displayName}}}}}}';
   const r = await get("https://gql.twitch.tv/gql", { method: "POST", headers: { "client-id": "kimne78kx3ncx6brgo4mv6wki5h1ko", "content-type": "application/json" }, body: JSON.stringify({ query: q }) });
   if (!r.ok) return null;
   const j = await r.json();
@@ -41,7 +41,7 @@ async function why() {
   const out = {};
   try { const id = (process.env.TWITCH_CLIENT_ID || "").trim(), sec = (process.env.TWITCH_CLIENT_SECRET || "").trim(); out.helix_keys = id && sec ? "both set" : (id ? "secret MISSING" : "id MISSING");
     if (id && sec) { const r = await get("https://id.twitch.tv/oauth2/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ client_id: id, client_secret: sec, grant_type: "client_credentials" }) }); out.helix_token = r.status + " " + (await r.text()).slice(0, 100); } } catch (e) { out.helix_token = "ERR " + e.message; }
-  try { const q = 'query{game(name:"IRL"){streams(first:3,options:{sort:VIEWER_COUNT,broadcasterLanguages:["EN"]}){edges{node{title}}}}}'; const r = await get("https://gql.twitch.tv/gql", { method: "POST", headers: { "client-id": "kimne78kx3ncx6brgo4mv6wki5h1ko", "content-type": "application/json" }, body: JSON.stringify({ query: q }) }); out.gql = r.status + " " + (await r.text()).slice(0, 200); } catch (e) { out.gql = "ERR " + e.message; }
+  try { const q = 'query{game(name:"IRL"){streams(first:3,options:{sort:VIEWER_COUNT,broadcasterLanguages:[EN]}){edges{node{title}}}}}'; const r = await get("https://gql.twitch.tv/gql", { method: "POST", headers: { "client-id": "kimne78kx3ncx6brgo4mv6wki5h1ko", "content-type": "application/json" }, body: JSON.stringify({ query: q }) }); out.gql = r.status + " " + (await r.text()).slice(0, 200); } catch (e) { out.gql = "ERR " + e.message; }
   return out;
 }
 export default async (req) => {
