@@ -14,7 +14,9 @@ export default async () => {
         const b = m[1];
         const t = (b.match(/<title>([\s\S]*?)<\/title>/) || [])[1];
         const tr = (b.match(/<ht:approx_traffic>([\s\S]*?)<\/ht:approx_traffic>/) || [])[1];
-        return t ? { topic: dec(t).slice(0, 80), traffic: tr ? dec(tr).slice(0, 12) : "" } : null;
+        const nt = (b.match(/<ht:news_item_title>([\s\S]*?)<\/ht:news_item_title>/) || [])[1];
+        const ns = (b.match(/<ht:news_item_source>([\s\S]*?)<\/ht:news_item_source>/) || [])[1];
+        return t ? { topic: dec(t).slice(0, 80), traffic: tr ? dec(tr).slice(0, 12) : "", why: nt ? dec(nt).replace(/<[^>]*>/g, "").slice(0, 150) : "", src: ns ? dec(ns).slice(0, 40) : "" } : null;
       }).filter(Boolean).slice(0, 12);
       if (topics.length) { cache = { ok: true, topics }; at = Date.now(); return new Response(JSON.stringify(cache), { headers: h }); }
     } catch (e) {}

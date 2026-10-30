@@ -67,7 +67,7 @@ async function sessionUser(req, s) {
 // ---- extras: settings, badges, name colors, reactions, presence ----
 const EMOJI = ["🔥","😂","❤️","👍","💀","👀"];
 const COLORS = ["#ff5c5c","#ff9f43","#ffd23f","#53fc18","#2ee6a6","#35c9ff","#6c8cff","#b57bff","#ff6bd6","#ffffff"];
-const BADGES = ["MOD","VIP","SUB","OG"];
+const BADGES = ["MOD","VIP","SUB","OG","VERIFIED","OURI"];
 const getCfg = async s => { const c = (await s.get("cfg", { type: "json" })) || {}; return { slow: Math.max(0, Math.min(Number(c.slow) || 0, 300)), words: Array.isArray(c.words) ? c.words.slice(0, 300) : [], pin: c.pin || null }; };
 const norm = t => String(t).toLowerCase().replace(/[@4]/g, "a").replace(/0/g, "o").replace(/[1!|]/g, "i").replace(/3/g, "e").replace(/[$5]/g, "s").replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ").trim();
 function badWord(text, words) {
@@ -80,10 +80,63 @@ function badWord(text, words) {
   return false;
 }
 const snip = t => String(t).replace(/\s+/g, " ").slice(0, 70);
-async function maps(s) { return { badges: (await s.get("badges", { type: "json" })) || {}, colors: (await s.get("colors", { type: "json" })) || {}, reacts: (await s.get("reacts", { type: "json" })) || {} }; }
+// ---- points + levels: +2 per message (every 20s, up to 200/day), daily check-in with a streak bonus ----
+const etDay = (off = 0) => new Date(Date.now() - off).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+const lvOf = p => 1 + Math.floor(Math.sqrt(Math.max(0, p) / 40));
+// weekly (Monday start, New York time) and monthly point + message counters; they roll over by themselves
+const wkKey = () => { const d = new Date(etDay() + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); };
+const moKey = () => etDay().slice(0, 7);
+const bump = (r, n, m) => { const w = wkKey(), mo = moKey(); if (!r.w || r.w.k !== w) r.w = { k: w, p: 0, m: 0 }; if (!r.mo || r.mo.k !== mo) r.mo = { k: mo, p: 0, m: 0 }; r.w.p += n; r.mo.p += n; r.w.m += m; r.mo.m += m; };
+const addP = (r, n) => { r.p += n; bump(r, n, 0); };
+const newRec = () => ({ p: 0, st: 0, ci: "", d: "", dp: 0, t: 0, n: "", vids: [], upc: 0, mc: 0, j: Date.now(), q: { d: "", m: 0, v: [], u: 0, pm: 0, pv: 0, pu: 0 } });
+const recOf = (pt, me) => { const r = (pt[me.id] ||= newRec()); r.n = me.name; r.vids ||= []; r.upc ||= 0; const day = etDay(); if (!r.q || r.q.d !== day) r.q = { d: day, m: 0, v: [], u: 0, pm: 0, pv: 0, pu: 0 }; return r; };
+const questPay = r => { let g = 0; const q = r.q; if (!q.pm && q.m >= 10) { q.pm = 1; g += 15; } if (!q.pv && q.v.length >= 3) { q.pv = 1; g += 5; } if (!q.pu && q.u >= 1) { q.pu = 1; g += 5; } addP(r, g); return g; };
+const REWARDS = [{ lv: 5, t: "Premium name colors" }, { lv: 10, t: "REGULAR badge" }, { lv: 15, t: "More premium colors" }, { lv: 20, t: "Glowing name" }, { lv: 25, t: "ELITE badge" }, { lv: 50, t: "LEGEND badge" }];
+const PREM = [["#ffe066", 5], ["#7df9ff", 5], ["#ff4d9d", 15], ["#a6ff00", 15]];
+const autoBadge = lv => lv >= 50 ? "LEGEND" : lv >= 25 ? "ELITE" : lv >= 10 ? "REGULAR" : "";
+const ptsInfo = (r, day) => { const p = (r && r.p) || 0, lv = lvOf(p), lo = 40 * (lv - 1) * (lv - 1), hi = 40 * lv * lv, q = r && r.q && r.q.d === day ? r.q : { m: 0, v: [], u: 0, pm: 0, pv: 0, pu: 0 }, nr = REWARDS.find(x => x.lv > lv);
+  return { p, lv, cur: p - lo, need: hi - lo, st: (r && (r.ci === day || r.ci === etDay(86400000))) ? (r.st || 0) : 0, can: !(r && r.ci === day), linked: !!(r && r.vids && r.vids.length),
+    quests: [{ k: "m", l: "Send 10 messages", n: Math.min(q.m, 10), max: 10, pts: 15, done: !!q.pm }, { k: "v", l: "Vote on 3 clips", n: Math.min(q.v.length, 3), max: 3, pts: 5, done: !!q.pv }, { k: "u", l: "Upload a clip", n: Math.min(q.u, 1), max: 1, pts: 5, done: !!q.pu }],
+    next: nr ? { lv: nr.lv, t: nr.t } : null }; };
+// +1 point for every upvote on one of your clips from somebody else (your own votes never count)
+async function syncUps(r) {
+  if (!r.vids.length) return 0;
+  const db = getStore("ouri"), clips = (await db.get("clips", { type: "json" })) || {}, votes = (await db.get("votes", { type: "json" })) || {}, mine = new Set(r.vids);
+  const ids = Object.keys(clips).filter(id => mine.has(clips[id] && clips[id].by)); let U = 0;
+  for (const [voter, d] of Object.entries(votes)) { if (mine.has(voter)) continue; const v = (d && d.v) || {}; for (const id of ids) if (v[id] === 1) U++; }
+  const gain = Math.max(0, U - (r.upc || 0)); if (gain) { addP(r, gain); r.upc = U; } return gain;
+}
+const fmtMs = ms => { const m = Math.floor(ms / 60000), h = Math.floor(m / 60); return h ? h + "h " + (m % 60) + "m" : m + "m"; };
+async function botReply(cmd, c) {
+  const { me, pt, pr, req, s } = c, day = etDay(), info = ptsInfo(pr, day), at = "@" + me.name + ": ", rank = () => Object.values(pt).filter(x => (x.p || 0) > pr.p).length + 1;
+  switch (cmd) {
+    case "points": case "level": case "lvl": case "rank": return at + "Level " + info.lv + " · " + info.p.toLocaleString() + " points · #" + rank() + " on the points board · " + (info.need - info.cur) + " points to level " + (info.lv + 1) + ".";
+    case "streak": return at + (info.st > 0 ? "🔥 " + info.st + "-day check-in streak." : "No streak yet. Hit the daily check-in to start one!");
+    case "daily": case "quests": return at + info.quests.map(x => x.l + " " + x.n + "/" + x.max + (x.done ? " ✓" : "")).join(" · ") + " · Check-in " + (info.can ? "ready" : "done ✓");
+    case "top": { const t = Object.values(pt).filter(x => x.n && x.p > 0).sort((a, b) => b.p - a.p).slice(0, 3).map((x, i) => (i + 1) + ". " + x.n + " (Lv " + lvOf(x.p) + ")").join("   "); return t ? "Top points: " + t : "Nobody is on the points board yet. Be the first!"; }
+    case "uptime": try { const j = await (await fetch(new URL("/api/status", req.url))).json(); if (j && j.live) { const ms = j.started ? Date.now() - j.started : 0; return "Ouri is LIVE" + (ms > 60000 ? " and has been streaming for " + fmtMs(ms) : "") + (j.viewers != null ? " · " + j.viewers + " watching" : "") + "."; } return "Ouri is offline right now."; } catch { return "Couldn’t check the stream right now."; }
+    case "clip": { const k = await s.get("kickclips", { type: "json" }).catch(() => null), x = k && k.clips && k.clips[0]; return x ? "Latest clip: " + x.title + " " + x.url : "Check the Clips tab for the latest clips!"; }
+    case "socials": return "Kick: kick.com/ouri · Twitch: twitch.tv/ouri · YouTube: @OuriTheKid · TikTok, X and Instagram: OuriTheKid";
+    case "lurk": return "@" + me.name + " is lurking 👀 Thanks for hanging out!";
+    case "commands": case "help": return "Commands: !points !streak !daily !top !uptime !clip !socials !lurk";
+  }
+  return null;
+}
+async function maps(s) { return { badges: (await s.get("badges", { type: "json" })) || {}, colors: (await s.get("colors", { type: "json" })) || {}, reacts: (await s.get("reacts", { type: "json" })) || {}, pts: (await s.get("points", { type: "json" })) || {} }; }
 const rxOf = (r, id, uid) => { const o = {}; const e = (r || {})[id]; if (!e) return undefined; for (const [k, a] of Object.entries(e)) if (a.length) o[k] = [a.length, uid ? a.includes(uid) : false]; return Object.keys(o).length ? o : undefined; };
-const pubMsg = (m, mp, uid, owner) => { const o = { id: m.id, name: m.name, text: m.text, t: m.t, badge: m.badge === "OWNER" ? "OWNER" : (mp.badges[m.uid] || m.badge || ""), color: mp.colors[m.uid] || "" };
+const pubMsg = (m, mp, uid, owner) => { const lv = m.uid === "bot" ? 0 : lvOf(((mp.pts || {})[m.uid] || {}).p || 0); let badge = m.badge === "OWNER" ? "OWNER" : (mp.badges[m.uid] || m.badge || ""); const ab = (m.badge === "OWNER" || m.uid === "bot") ? "" : autoBadge(lv); if (ab && !badge.split(",").includes(ab)) badge = badge ? badge + "," + ab : ab;
+  const o = { id: m.id, name: m.name, text: m.text, t: m.t, badge, color: mp.colors[m.uid] || "" }; if (lv) o.lv = lv;
   if (m.reply) o.reply = m.reply; const rx = rxOf(mp.reacts, m.id, uid); if (rx) o.rx = rx; if (owner) o.uid = m.uid; return o; };
+const pubPoll = (p, uid) => { if (!p || !p.q) return null; const n = p.opts.map(() => 0); for (const v of Object.values(p.votes || {})) if (n[v] != null) n[v]++; return { id: p.id, q: p.q, opts: p.opts.map((t, i) => ({ t, n: n[i] })), total: n.reduce((a, b) => a + b, 0), open: !!p.open, mine: uid && p.votes && p.votes[uid] != null ? p.votes[uid] : -1, by: p.by || "" }; };
+const badgeOf = (uid, mp) => { const r = mp.pts[uid] || {}, lv = lvOf(r.p || 0); let b = mp.badges[uid] || ""; const ab = autoBadge(lv); if (ab && !b.split(",").includes(ab)) b = b ? b + "," + ab : ab; return b; };
+function spotOf(pt, mp, sp) {
+  const wk = wkKey(), ents = Object.entries(pt).filter(([, x]) => x.n);
+  let hit = null, manual = false;
+  if (sp && sp.n) { hit = ents.find(([, x]) => x.n.toLowerCase() === sp.n.toLowerCase()) || null; manual = !!hit; }
+  if (!hit) { hit = ents.filter(([, x]) => x.w && x.w.k === wk && x.w.p > 0).sort((a, b) => b[1].w.p - a[1].w.p)[0] || null; }
+  if (!hit) return null; const [id, x] = hit;
+  return { n: x.n, lv: lvOf(x.p), p: x.p, wp: x.w && x.w.k === wk ? x.w.p : 0, wm: x.w && x.w.k === wk ? x.w.m : 0, badge: badgeOf(id, mp), color: mp.colors[id] || "", note: manual ? String(sp.note || "") : "", manual };
+}
 async function presence(s, sid, uid, recent) {
   try {
     const now = Date.now(); const p = (await s.get("presence", { type: "json" })) || {}; let dirty = false;
@@ -105,6 +158,19 @@ export default async (req) => {
 
   if (req.method === "GET") {
     const q = new URL(req.url).searchParams;
+    if (q.has("board")) {
+      const pt = (await s.get("points", { type: "json" })) || {}, mp = await maps(s), wk = wkKey(), mk = moKey();
+      const per = (f, key) => Object.values(pt).filter(x => x.n && x[f] && x[f].k === key && x[f].p > 0).sort((a, b) => b[f].p - a[f].p).slice(0, 10).map(x => ({ n: x.n, p: x[f].p, lv: lvOf(x.p) }));
+      const chat = (f, key) => Object.values(pt).filter(x => x.n && x[f] && x[f].k === key && x[f].m > 0).sort((a, b) => b[f].m - a[f].m).slice(0, 10).map(x => ({ n: x.n, m: x[f].m }));
+      return J({ board: Object.values(pt).filter(x => x.n && x.p > 0).sort((a, b) => b.p - a.p).slice(0, 10).map(x => ({ n: x.n, p: x.p, lv: lvOf(x.p) })), week: per("w", wk), month: per("mo", mk), chatWeek: chat("w", wk), chatMonth: chat("mo", mk), wk, mk, spot: spotOf(pt, mp, await s.get("spot", { type: "json" })) });
+    }
+    if (q.has("profile")) {
+      const nm = String(q.get("profile") || "").trim().toLowerCase().slice(0, 24); if (!nm) return J({ error: "name" }, 400);
+      const pt = (await s.get("points", { type: "json" })) || {}, mp = await maps(s), hit = Object.entries(pt).find(([, x]) => x.n && x.n.toLowerCase() === nm);
+      if (!hit) return J({ ok: true, found: false });
+      const [id, x] = hit, wk = wkKey(), rank = Object.values(pt).filter(y => (y.p || 0) > x.p).length + 1;
+      return J({ ok: true, found: true, name: x.n, lv: lvOf(x.p), p: x.p, rank, wp: x.w && x.w.k === wk ? x.w.p : 0, msgs: x.mc || 0, st: ptsInfo(x, etDay()).st, ups: x.upc || 0, badge: badgeOf(id, mp), color: mp.colors[id] || "", joined: x.j || 0 });
+    }
     if (q.has("log")) {
       if (!owner) return J({ error: "owner only" }, 403);
       const key = String(q.get("log") || "").trim().slice(0, 40); if (!key) return J({ error: "name" }, 400);
@@ -132,7 +198,7 @@ export default async (req) => {
     const mp = await maps(s), cfg = await getCfg(s);
     const out = msgs.map(m => pubMsg(m, mp, me && me.id, owner));
     const sid = String(q.get("sid") || ""), online = await presence(s, /^[a-z0-9]{6,20}$/.test(sid) ? sid : "", me && me.id, ((await s.get("chat", { type: "json" })) || []).filter(m => Date.now() - m.t < 70000 && m.uid).map(m => m.uid));
-    const r = { messages: out, slow: cfg.slow, pin: cfg.pin, online, me: me ? { id: me.id, name: me.name, color: mp.colors[me.id] || "", mutedUntil: mutes[me.id] ? (mutes[me.id].until || -1) : 0, banned: !!(mutes[me.id] && mutes[me.id].ban) } : null };
+    const r = { messages: out, slow: cfg.slow, pin: cfg.pin, online, me: me ? { id: me.id, name: me.name, color: mp.colors[me.id] || "", mutedUntil: mutes[me.id] ? (mutes[me.id].until || -1) : 0, banned: !!(mutes[me.id] && mutes[me.id].ban), mod: String(mp.badges[me.id] || "").split(",").includes("MOD"), pts: ptsInfo(mp.pts[me.id], etDay()) } : null, poll: pubPoll(await s.get("poll", { type: "json" }), me && me.id) };
     if (owner) { r.words = cfg.words; }
     if (owner) r.mutes = Object.entries(mutes).map(([uid, v]) => ({ uid, name: v.name, until: v.until || 0, ban: !!v.ban }));
     return J(r);
@@ -144,8 +210,19 @@ export default async (req) => {
   if (!b || typeof b !== "object") return J({ error: "Bad request." }, 400);
 
   // ---- moderation (owner key required) ----
-  if (["delete", "mute", "unmute", "clear", "erase", "purge", "cfg", "pin", "unpin", "badge"].includes(b.op)) {
-    if (!owner) return J({ error: "owner only" }, 403);
+  if (["delete", "mute", "unmute", "clear", "erase", "purge", "cfg", "pin", "unpin", "badge", "poll", "pollend", "pollclear", "spotlight"].includes(b.op)) {
+    let isMod = false, actor = null, bmap0 = null;
+    if (!owner && ["delete", "mute", "unmute", "pin", "unpin", "poll", "pollend", "pollclear"].includes(b.op)) {   // site moderators (accounts with the MOD badge)
+      actor = await sessionUser(req, s); bmap0 = (await s.get("badges", { type: "json" })) || {};
+      isMod = !!actor && String(bmap0[actor.id] || "").split(",").includes("MOD");
+    }
+    if (!owner && !isMod) return J({ error: "owner only" }, 403);
+    if (isMod && b.op === "mute") {
+      if (b.ban === true) return J({ error: "Only the owner can ban." }, 403);
+      const tu = String(b.uid || "");
+      if (tu === actor.id || String(bmap0[tu] || "").split(",").includes("MOD")) return J({ error: "You can't time out a moderator." }, 403);
+      b.minutes = Math.max(1, Math.min(Number(b.minutes) || 10, 60));
+    }
     if (b.op === "delete") {
       const list = (await s.get("chat", { type: "json" })) || [];
       await s.setJSON("chat", list.filter(m => m.id !== String(b.id)));
@@ -160,13 +237,28 @@ export default async (req) => {
     }
     if (b.op === "pin" || b.op === "unpin") {
       const cur = await getCfg(s); let pin = null;
-      if (b.op === "pin") { const text = String(b.text || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 300); if (!text) return J({ error: "Type something to pin." }, 400); pin = { text, by: String(b.name || "").slice(0, 20), t: Date.now() }; }
+      if (b.op === "pin") { const text = String(b.text || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 300); if (!text) return J({ error: "Type something to pin." }, 400); pin = { text, by: String(isMod && actor ? actor.name : (b.name || "")).slice(0, 20), t: Date.now() }; }
       await s.setJSON("cfg", { slow: cur.slow, words: cur.words, pin }); return J({ ok: true, pin });
+    }
+    if (b.op === "poll") {
+      const q = String(b.q || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 120), opts = (Array.isArray(b.opts) ? b.opts : []).map(x => String(x || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 40)).filter(Boolean).slice(0, 5);
+      if (!q || opts.length < 2) return J({ error: "A poll needs a question and at least 2 options." }, 400);
+      const p = { id: Date.now().toString(36), q, opts, votes: {}, open: true, by: String(isMod && actor ? actor.name : "Ouri").slice(0, 20), t: Date.now() };
+      await s.setJSON("poll", p); return J({ ok: true, poll: pubPoll(p, null) });
+    }
+    if (b.op === "pollend") { const p = await s.get("poll", { type: "json" }); if (!p) return J({ ok: true }); p.open = false; await s.setJSON("poll", p); return J({ ok: true, poll: pubPoll(p, null) }); }
+    if (b.op === "pollclear") { await s.delete("poll"); return J({ ok: true }); }
+    if (b.op === "spotlight") {
+      const nm = String(b.name || "").trim().slice(0, 24); if (!nm) { await s.delete("spot"); return J({ ok: true, auto: true }); }
+      const pt = (await s.get("points", { type: "json" })) || {}, hit = Object.values(pt).find(x => x.n && x.n.toLowerCase() === nm.toLowerCase());
+      if (!hit) return J({ error: "No chat account with that name has points yet." }, 404);
+      await s.setJSON("spot", { n: hit.n, note: String(b.note || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 80), t: Date.now() }); return J({ ok: true, name: hit.n });
     }
     if (b.op === "badge") {
       const uid = String(b.uid || ""); if (!/^[a-f0-9]{16}$/.test(uid)) return J({ error: "uid" }, 400);
-      const bd = (await s.get("badges", { type: "json" })) || {}, v = String(b.badge || "").toUpperCase();
-      if (v && !BADGES.includes(v)) return J({ error: "badge" }, 400);
+      const bd = (await s.get("badges", { type: "json" })) || {}, parts = String(b.badge || "").toUpperCase().split(",").map(x => x.trim()).filter(Boolean);
+      if (parts.some(x => !BADGES.includes(x))) return J({ error: "badge" }, 400);
+      const v = [...new Set(parts)].join(",");
       if (v) bd[uid] = v; else delete bd[uid]; await s.setJSON("badges", bd); return J({ ok: true });
     }
     if (b.op === "clear") { await s.setJSON("clearedAt", { t: Date.now() }); return J({ ok: true }); } // hides everything older; archive is kept
@@ -189,7 +281,7 @@ export default async (req) => {
       const ban = b.ban === true, nm = String(b.name || "").slice(0, 20);
       mutes[uid] = { name: nm, until: !ban && mins ? Date.now() + mins * 60000 : 0, ban, t: Date.now() };
       await logMod(s, { uid, name: nm, op: ban ? "ban" : "timeout", mins: ban ? 0 : mins });
-    } else { const uid = String(b.uid || ""); await logMod(s, { uid, name: (mutes[uid] || {}).name || "", op: "lift" }); delete mutes[uid]; }
+    } else { const uid = String(b.uid || ""); if (isMod && mutes[uid] && mutes[uid].ban) return J({ error: "Only the owner can lift a ban." }, 403); await logMod(s, { uid, name: (mutes[uid] || {}).name || "", op: "lift" }); delete mutes[uid]; }
     await s.setJSON("mutes", activeMutes(mutes)); return J({ ok: true });
   }
 
@@ -201,8 +293,14 @@ export default async (req) => {
   if (mutes[me.id]) return J({ error: mutes[me.id].ban ? "You’ve been banned from chat." : "You’re timed out for a bit. Try again soon.", muted: true }, 403);
   if (b.op === "color") {
     const col = String(b.color || ""); const cs = (await s.get("colors", { type: "json" })) || {};
-    if (col && !COLORS.includes(col)) return J({ error: "color" }, 400);
+    if (col && !COLORS.includes(col)) { const lvC = lvOf((((await s.get("points", { type: "json" })) || {})[me.id] || {}).p || 0); if (!PREM.some(([pc, pl]) => pc === col && lvC >= pl)) return J({ error: "That color unlocks at a higher level." }, 400); }
     if (col) cs[me.id] = col; else delete cs[me.id]; await s.setJSON("colors", cs); return J({ ok: true, color: col });
+  }
+  if (b.op === "pollvote") {
+    const p = await s.get("poll", { type: "json" }), i = Number(b.i);
+    if (!p || !p.open) return J({ error: "That poll is closed." }, 400);
+    if (!Number.isInteger(i) || i < 0 || i >= p.opts.length) return J({ error: "Bad option." }, 400);
+    p.votes[me.id] = i; await s.setJSON("poll", p); return J({ ok: true, poll: pubPoll(p, me.id) });
   }
   if (b.op === "react") {
     const id = String(b.id || ""), em = String(b.emoji || ""); if (!/^[a-z0-9]{6,24}$/.test(id) || !EMOJI.includes(em)) return J({ error: "Bad request." }, 400);
@@ -211,6 +309,39 @@ export default async (req) => {
     if (!a.length) delete e[em]; if (!Object.keys(e).length) delete rx[id];
     const keys = Object.keys(rx); if (keys.length > 800) for (const k of keys.sort((x, y) => idTime(x) - idTime(y)).slice(0, keys.length - 800)) delete rx[k];
     await s.setJSON("reacts", rx); return J({ ok: true, rx: rxOf(rx, id, me.id) || {} });
+  }
+  if (["checkin", "link", "sync", "quest"].includes(b.op)) {
+    const pt = (await s.get("points", { type: "json" })) || {}, r = recOf(pt, me), day = etDay();
+    if (b.op === "checkin") {
+      if (r.ci === day) return J({ error: "You already checked in today. Come back tomorrow!" }, 400);
+      r.st = r.ci === etDay(86400000) ? (r.st || 0) + 1 : 1; r.ci = day;
+      const gain = 25 + 5 * Math.min(r.st - 1, 6); addP(r, gain);
+      await s.setJSON("points", pt); return J({ ok: true, gain, pts: ptsInfo(r, day) });
+    }
+    if (b.op === "link") {   // ties this browser's clip-voting id to the account so clip upvotes can earn points
+      const vid = String(b.vid || ""); if (!/^[A-Za-z0-9_-]{4,60}$/.test(vid)) return J({ error: "vid" }, 400);
+      const lk = (await s.get("links", { type: "json" })) || {};
+      if (lk[vid] && lk[vid] !== me.id) return J({ ok: false }, 200);
+      if (!r.vids.includes(vid) && r.vids.length < 3) { r.vids.push(vid); lk[vid] = me.id; await s.setJSON("links", lk); await s.setJSON("points", pt); }
+      return J({ ok: true, pts: ptsInfo(r, day) });
+    }
+    if (b.op === "sync") {
+      if (Date.now() - (r.sy || 0) < 20000) return J({ ok: true, gain: 0, pts: ptsInfo(r, day) });
+      r.sy = Date.now(); const gain = await syncUps(r); await s.setJSON("points", pt); return J({ ok: true, gain, pts: ptsInfo(r, day) });
+    }
+    if (b.op === "quest") {
+      if (!r.vids.length) return J({ ok: false }, 200);
+      const db = getStore("ouri");
+      if (b.q === "vote") {
+        const id = String(b.id || ""); if (!/^[A-Za-z0-9_-]{1,60}$/.test(id) || r.q.v.includes(id) || r.q.v.length >= 3) return J({ ok: true, pts: ptsInfo(r, day) });
+        const votes = (await db.get("votes", { type: "json" })) || {};
+        if (r.vids.some(v => votes[v] && votes[v].v && votes[v].v[id])) r.q.v.push(id);
+      } else if (b.q === "upload") {
+        const clips = (await db.get("clips", { type: "json" })) || {};
+        if (Object.values(clips).some(x => x && r.vids.includes(x.by) && etDay(Date.now() - x.created) === day)) r.q.u = 1;
+      }
+      const gain = questPay(r); await s.setJSON("points", pt); return J({ ok: true, gain, pts: ptsInfo(r, day) });
+    }
   }
   const cfg = await getCfg(s);
   const last = (await s.get("last/" + me.id, { type: "json" })) || { t: 0 };
@@ -227,6 +358,12 @@ export default async (req) => {
   const list = (await s.get("chat", { type: "json" })) || [];
   list.push(msg); await s.setJSON("chat", list.slice(-KEEP));
   await migrate(s); await archAdd(s, [msg]);
-  const mp = { badges: (await s.get("badges", { type: "json" })) || {}, colors: (await s.get("colors", { type: "json" })) || {}, reacts: {} };
-  return J({ ok: true, message: pubMsg(msg, mp, me.id, false) });
+  const pt = (await s.get("points", { type: "json" })) || {}, pr = recOf(pt, me), pday = etDay();
+  if (pr.d !== pday) { pr.d = pday; pr.dp = 0; }
+  if (Date.now() - (pr.t || 0) >= 20000 && pr.dp < 200) { addP(pr, 2); pr.dp += 2; pr.t = Date.now(); }
+  pr.mc = (pr.mc || 0) + 1; bump(pr, 0, 1); pr.q.m++; questPay(pr); await s.setJSON("points", pt);
+  let bot = null; const cm = /^!([a-z]{2,12})(?:\s|$)/i.exec(text);
+  if (cm) { const reply = await botReply(cm[1].toLowerCase(), { me, pt, pr, req, s }); if (reply) { bot = { id: (Date.now() + 1).toString(36) + crypto.randomBytes(3).toString("hex"), uid: "bot", name: "OuriBot", text: reply, t: Date.now() + 1, badge: "BOT" }; const l2 = (await s.get("chat", { type: "json" })) || []; l2.push(bot); await s.setJSON("chat", l2.slice(-KEEP)); await archAdd(s, [bot]); } }
+  const mp = { badges: (await s.get("badges", { type: "json" })) || {}, colors: (await s.get("colors", { type: "json" })) || {}, reacts: {}, pts: pt };
+  return J({ ok: true, message: pubMsg(msg, mp, me.id, false), bot: bot ? pubMsg(bot, mp, me.id, false) : undefined });
 };
