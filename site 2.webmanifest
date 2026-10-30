@@ -1,0 +1,17 @@
+{
+ "id": "/",
+ "name": "Ouri",
+ "short_name": "Ouri",
+ "description": "Ouri: Kick Partner. Live stream, IRL map, clips, VODs and chat.",
+ "start_url": "/",
+ "scope": "/",
+ "display": "standalone",
+ "orientation": "portrait-primary",
+ "background_color": "#0a1f13",
+ "theme_color": "#0a1f13",
+ "categories": ["entertainment", "social"],
+ "icons": [
+  { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+  { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+ ]
+}
