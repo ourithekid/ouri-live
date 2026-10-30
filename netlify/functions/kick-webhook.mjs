@@ -22,6 +22,18 @@ async function publicKey() {
 // count one chat message and keep the Top 5 chatters (strong reads so quick messages don't overwrite each other)
 const IGNORE = new Set(["botrix", "kickbot", "nightbot", "streamelements", "moobot", "buttbot"]);
 const isBot = n => IGNORE.has(String(n || "").toLowerCase().replace(/[^a-z0-9]/g, ""));
+
+const etDay = () => new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+const etWk = () => { const d = new Date(etDay() + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); };
+const etMo = () => etDay().slice(0, 7);
+const bump1 = (cc, key, name, wk, mo) => { const x = cc[key] || (cc[key] = { name, v: 0 }); x.name = x.name || name; x.v = (x.v || 0) + 1; if (!x.w || x.w.k !== wk) x.w = { k: wk, v: 0 }; x.w.v++; if (!x.m || x.m.k !== mo) x.m = { k: mo, v: 0 }; x.m.v++; };
+const rowsOf = (cc, f, pick) => Object.values(cc).map(u => ({ u, v: pick(u) })).filter(x => x.v > 0).sort((a, b) => b.v - a.v).slice(0, 10).map(x => ({ name: x.u.name.slice(0, 40), n: x.v.toLocaleString("en-US") + (x.v === 1 ? " msg" : " msgs") }));
+const publish = async (cc, n, via) => {
+  const wk = etWk(), mo = etMo(), pubS = getStore({ name: "ouri", consistency: "strong" }), m = (await pubS.get("chatters", { type: "json" })) || {};
+  m.top = { rows: rowsOf(cc, 0, u => u.v) }; m.topW = { wk, rows: rowsOf(cc, 0, u => u.w && u.w.k === wk ? u.w.v : 0) }; m.topM = { mk: mo, rows: rowsOf(cc, 0, u => u.m && u.m.k === mo ? u.m.v : 0) };
+  m.meta = { last: new Date().toISOString(), n: ((m.meta && m.meta.n) || 0) + n, via };
+  await pubS.setJSON("chatters", m);
+};
 async function chatCount(name, broadcaster) {
   if (!name) return;
   const key = String(name).toLowerCase();
@@ -29,14 +41,11 @@ async function chatCount(name, broadcaster) {
   const ps = getStore({ name: "ouri-private", consistency: "strong" });
   const cc = (await ps.get("chatcounts", { type: "json" })) || {};
   for (const k of Object.keys(cc)) if (isBot(k)) delete cc[k];
-  cc[key] = { name: (cc[key] && cc[key].name) || name, v: ((cc[key] && cc[key].v) || 0) + 1 };
-  let all = Object.values(cc).sort((a, b) => b.v - a.v);
-  if (all.length > 200) { const keep = {}; all.slice(0, 200).forEach(u => { keep[u.name.toLowerCase()] = u; }); all = Object.values(keep).sort((a, b) => b.v - a.v); await ps.setJSON("chatcounts", keep); }
-  else await ps.setJSON("chatcounts", cc);
-  const top = all.slice(0, 10).map(u => ({ name: u.name.slice(0, 40), n: u.v.toLocaleString("en-US") + (u.v === 1 ? " msg" : " msgs") }));
-  const pubS = getStore({ name: "ouri", consistency: "strong" });
-  const m = (await pubS.get("chatters", { type: "json" })) || {};
-  m.top = { rows: top }; m.meta = { last: new Date().toISOString(), n: ((m.meta && m.meta.n) || 0) + 1 }; await pubS.setJSON("chatters", m);
+  bump1(cc, key, name, etWk(), etMo());
+  let all = Object.values(cc).sort((a, b) => b.v - a.v), keep = cc;
+  if (all.length > 400) { keep = {}; all.slice(0, 400).forEach(u => { keep[u.name.toLowerCase()] = u; }); }
+  await ps.setJSON("chatcounts", keep);
+  await publish(keep, 1, "kick-webhook");
 }
 
 async function log(entry) {
