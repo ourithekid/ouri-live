@@ -22,13 +22,14 @@ export const whyNot = s => {
   return w ? "word=" + w : "";
 };
 export const isEnglish = s => !whyNot(s);
+const thumbOf = s => { const t = s.thumb || s.thumbnail; const u = typeof t === "string" ? t : (t && (t.src || t.url)) || ""; return /^https:\/\//.test(u) ? u : ""; };
 async function keylessIrl() {
   const UA = { accept: "application/json", "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36" };
   for (const u of ["https://kick.com/stream/livestreams/en?page=1&limit=100&subcategory=irl&sort=desc", "https://kick.com/stream/livestreams/en?page=1&limit=100&sort=desc"]) {
     try {
       const r = await fetch(u, { headers: UA }); if (!r.ok) continue;
       const j = await r.json(), arr = Array.isArray(j) ? j : (j.data || []);
-      const out = arr.map(x => ({ slug: (x.channel && x.channel.slug) || x.slug, stream_title: x.session_title || x.stream_title || "", viewer_count: x.viewer_count ?? x.viewers ?? 0, language: x.language || "en", cat: (x.categories && x.categories[0] && x.categories[0].name) || (x.category && x.category.name) || "" })).filter(x => x.slug && /irl/i.test(x.cat));
+      const out = arr.map(x => ({ slug: (x.channel && x.channel.slug) || x.slug, stream_title: x.session_title || x.stream_title || "", viewer_count: x.viewer_count ?? x.viewers ?? 0, language: x.language || "en", thumb: (x.thumbnail && (x.thumbnail.src || x.thumbnail.url)) || (typeof x.thumbnail === "string" ? x.thumbnail : ""), cat: (x.categories && x.categories[0] && x.categories[0].name) || (x.category && x.category.name) || "" })).filter(x => x.slug && /irl/i.test(x.cat));
       if (out.length) return out;
     } catch (e) {}
   }
@@ -59,14 +60,16 @@ export default async (req) => {
     }
     const irlAll = mode === "targeted" ? all : all.filter(s => /irl/i.test((s.category && s.category.name) || ""));
     if (dbg) return new Response(JSON.stringify({ mode, catId, total: all.length, irl: irlAll.length, languages: [...new Set(all.map(s => s.language))].slice(0, 15), sample: irlAll.slice(0, 12).map(s => ({ title: String(s.stream_title || "").slice(0, 60), language: s.language, why: whyNot(s) || "kept" })) }), { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
-    const list = irlAll.filter(isEnglish);
-    cache = { ok: true, streams: list.slice(0, 24).map(s => ({ slug: s.slug, title: s.stream_title, viewers: s.viewer_count })) };
+    let list = irlAll.filter(isEnglish);
+    if (list.length < 20) { const have = new Set(list.map(x => x.slug)); list = list.concat(irlAll.filter(x => !have.has(x.slug) && (!x.language || /^(en|english)/i.test(String(x.language))))); }
+    cache = { ok: true, streams: list.slice(0, 20).map(s => ({ slug: s.slug, title: s.stream_title, viewers: s.viewer_count, thumb: thumbOf(s) })) };
     cacheAt = Date.now();
     return new Response(JSON.stringify(cache), { headers: h });
   } catch (e) {
     try {
-      const list = (await keylessIrl()).filter(isEnglish).sort((a, b) => b.viewer_count - a.viewer_count);
-      if (list.length) { cache = { ok: true, streams: list.slice(0, 24).map(s => ({ slug: s.slug, title: s.stream_title, viewers: s.viewer_count })) }; cacheAt = Date.now(); return new Response(JSON.stringify(cache), { headers: h }); }
+      const raw = (await keylessIrl()).sort((a, b) => b.viewer_count - a.viewer_count); let list = raw.filter(isEnglish);
+      if (list.length < 20) { const have = new Set(list.map(x => x.slug)); list = list.concat(raw.filter(x => !have.has(x.slug) && (!x.language || /^(en|english)/i.test(String(x.language))))); }
+      if (list.length) { cache = { ok: true, streams: list.slice(0, 20).map(s => ({ slug: s.slug, title: s.stream_title, viewers: s.viewer_count, thumb: thumbOf(s) })) }; cacheAt = Date.now(); return new Response(JSON.stringify(cache), { headers: h }); }
     } catch (e2) {}
     return new Response(JSON.stringify({ ok: false }), { status: 502, headers: { "content-type": "application/json" } });
   }
