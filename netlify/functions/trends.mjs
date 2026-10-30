@@ -5,6 +5,7 @@ export default async () => {
   const h = { "content-type": "application/json", "cache-control": "public, max-age=300" };
   if (cache && Date.now() - at < 600000) return new Response(JSON.stringify(cache), { headers: h });
   const urls = ["https://trends.google.com/trending/rss?geo=US", "https://trends.google.com/trends/trendingsearches/daily/rss?geo=US"];
+  const all = [], seen = new Set();
   for (const u of urls) {
     try {
       const r = await fetch(u, { headers: { "user-agent": "Mozilla/5.0 (compatible; OuriSite/1.0)" } });
@@ -17,9 +18,11 @@ export default async () => {
         const nt = (b.match(/<ht:news_item_title>([\s\S]*?)<\/ht:news_item_title>/) || [])[1];
         const ns = (b.match(/<ht:news_item_source>([\s\S]*?)<\/ht:news_item_source>/) || [])[1];
         return t ? { topic: dec(t).slice(0, 80), traffic: tr ? dec(tr).slice(0, 12) : "", why: nt ? dec(nt).replace(/<[^>]*>/g, "").slice(0, 150) : "", src: ns ? dec(ns).slice(0, 40) : "" } : null;
-      }).filter(Boolean).slice(0, 12);
-      if (topics.length) { cache = { ok: true, topics }; at = Date.now(); return new Response(JSON.stringify(cache), { headers: h }); }
+      }).filter(Boolean);
+      for (const t of topics) { const k = t.topic.toLowerCase(); if (!seen.has(k)) { seen.add(k); all.push(t); } }
+      if (all.length >= 18) break;
     } catch (e) {}
   }
+  if (all.length) { cache = { ok: true, topics: all.slice(0, 24) }; at = Date.now(); return new Response(JSON.stringify(cache), { headers: h }); }
   return new Response(JSON.stringify({ ok: false }), { status: 502, headers: { "content-type": "application/json" } });
 };
