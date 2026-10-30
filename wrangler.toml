@@ -1,0 +1,9 @@
+name = "ourilive"
+pages_build_output_dir = "dist"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ourilive"
+database_id = "PASTE-YOUR-D1-DATABASE-ID-HERE"
