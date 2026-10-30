@@ -13,6 +13,11 @@ export default async () => {
     await s.setJSON("healthcheck", { t: Date.now() });
     out.db = "ok (read/write works)";
   } catch (x) { out.db = "FAILED: " + (x && x.message || x); }
+  try {
+    const m = ((await getStore("ouri").get("chatters", { type: "json" })) || {}).meta;
+    const au = await getStore("ouri-private").get("auth", { type: "json" });
+    out.kick_chat_counter = { kick_account_connected: au ? "yes" : "NO (open /api/kick-auth?key=YOUR_OWNER_KEY)", kick_messages_counted: m ? m.n : 0, last_counted: m ? m.last : "never (Kick has not sent any chat messages to this site yet)" };
+  } catch (x) { out.kick_chat_counter = "ERROR " + (x && x.message || x); }
   const checks = [
     probe("kick_oauth_token", async () => {
       if (!e.KICK_CLIENT_ID || !e.KICK_CLIENT_SECRET) return "skipped (keys missing)";
