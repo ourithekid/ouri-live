@@ -6,7 +6,7 @@ const eqSafe = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(Str
 const isOwnerReq = req => !!process.env.OWNER_KEY && eqSafe(req.headers.get("x-owner-key") || "", process.env.OWNER_KEY);
 const sameOrigin = req => { const o = req.headers.get("origin"); if (!o) return true; try { const h = new URL(o).host; return h === (req.headers.get("host") || "") || h === new URL(req.url).host; } catch { return false; } };
 const hits = new Map();
-const limited = (req, key, max, ms) => { const ip = String(req.headers.get("x-nf-client-connection-ip") || req.headers.get("x-forwarded-for") || "?").split(",")[0].trim(); const k = key + "|" + ip, now = Date.now(); let h = hits.get(k); if (!h || now - h.t > ms) { h = { t: now, n: 0 }; hits.set(k, h); } h.n++; if (hits.size > 5000) for (const [kk, v] of hits) if (now - v.t > ms) hits.delete(kk); return h.n > max; };
+const limited = (req, key, max, ms) => { const ip = String((req.headers.get("cf-connecting-ip") || req.headers.get("x-nf-client-connection-ip")) || req.headers.get("x-forwarded-for") || "?").split(",")[0].trim(); const k = key + "|" + ip, now = Date.now(); let h = hits.get(k); if (!h || now - h.t > ms) { h = { t: now, n: 0 }; hits.set(k, h); } h.n++; if (hits.size > 5000) for (const [kk, v] of hits) if (now - v.t > ms) hits.delete(kk); return h.n > max; };
 
 
 // Accounts live in the PRIVATE store only. Emails are stored as a one-way hash, never shown anywhere. Passwords are salted + scrypt-hashed.
@@ -60,7 +60,7 @@ export default async (req) => {
     if (!/^[A-Za-z0-9_]{3,20}$/.test(name)) return J({ error: "Pick a name with 3 to 20 letters, numbers or underscores." }, 400);
     const norm = name.toLowerCase().replace(/0/g, "o").replace(/[1l]/g, "i").replace(/3/g, "e").replace(/5/g, "s").replace(/_/g, "");
     if (!isOwnerReq(req) && (RESERVED.has(name.toLowerCase()) || [...RESERVED].some(r => norm === r || norm === r.replace(/l/g, "i")))) return J({ error: "That name is reserved. Pick another." }, 400);
-    const ip = sha(req.headers.get("x-nf-client-connection-ip") || req.headers.get("x-forwarded-for") || "?");
+    const ip = sha((req.headers.get("cf-connecting-ip") || req.headers.get("x-nf-client-connection-ip")) || req.headers.get("x-forwarded-for") || "?");
     const rl = (await s.get("rl/" + ip, { type: "json" })) || { n: 0, t: Date.now() };
     if (Date.now() - rl.t > 3600000) { rl.n = 0; rl.t = Date.now(); }
     if (rl.n >= 5) return J({ error: "Too many new accounts from this connection. Try again later." }, 429);
