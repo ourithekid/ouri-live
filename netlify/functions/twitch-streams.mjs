@@ -1,7 +1,7 @@
 export const config = { path: "/api/twitch-streams" };
 
 // English-language IRL streams that are live on Twitch right now (the Twitch twin of /api/irl).
-// If TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET are set, it uses Twitch's official API.
+// If TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET are set in Netlify, it uses Twitch's official API.
 // Otherwise it falls back to the same public endpoint twitch.tv itself uses. Cached for 60 seconds.
 let cache = null, at = 0, tok = null, tokExp = 0;
 const H = { "content-type": "application/json; charset=utf-8", "cache-control": "public, max-age=60" };
@@ -21,14 +21,14 @@ async function viaHelix() {
   const g = await get("https://api.twitch.tv/helix/games?name=IRL", { headers: A });
   const gj = g.ok ? await g.json() : {};
   const gid = gj.data && gj.data[0] && gj.data[0].id; if (!gid) return null;
-  const r = await get("https://api.twitch.tv/helix/streams?first=24&language=en&game_id=" + encodeURIComponent(gid), { headers: A });
+  const r = await get("https://api.twitch.tv/helix/streams?first=30&language=en&game_id=" + encodeURIComponent(gid), { headers: A });
   if (!r.ok) return null;
   const j = await r.json();
   return (j.data || []).map(s => ({ login: login(s.user_login), name: clean(s.user_name, 40), title: clean(s.title, 120), viewers: Number(s.viewer_count) || 0 }));
 }
 
 async function viaGql() {
-  const q = 'query{game(name:"IRL"){streams(first:24,options:{sort:VIEWER_COUNT,broadcasterLanguages:[EN]}){edges{node{title viewersCount broadcaster{login displayName}}}}}}';
+  const q = 'query{game(name:"IRL"){streams(first:30,options:{sort:VIEWER_COUNT,broadcasterLanguages:[EN]}){edges{node{title viewersCount broadcaster{login displayName}}}}}}';
   const r = await get("https://gql.twitch.tv/gql", { method: "POST", headers: { "client-id": "kimne78kx3ncx6brgo4mv6wki5h1ko", "content-type": "application/json" }, body: JSON.stringify({ query: q }) });
   if (!r.ok) return null;
   const j = await r.json();
@@ -51,7 +51,7 @@ export default async (req) => {
   try { list = await viaHelix(); } catch {}
   if (!list || !list.length) { try { list = await viaGql(); } catch {} }
   if (list && list.length) {
-    cache = { ok: true, streams: list.filter(s => s.login).sort((a, b) => b.viewers - a.viewers).slice(0, 24) };
+    cache = { ok: true, streams: list.filter(s => s.login).sort((a, b) => b.viewers - a.viewers).slice(0, 20) };
     at = Date.now();
     return new Response(JSON.stringify(cache), { headers: H });
   }
