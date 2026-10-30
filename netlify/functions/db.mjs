@@ -7,7 +7,7 @@ const eqSafe = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(Str
 const isOwnerReq = req => !!process.env.OWNER_KEY && eqSafe(req.headers.get("x-owner-key") || "", process.env.OWNER_KEY);
 const sameOrigin = req => { const o = req.headers.get("origin"); if (!o) return true; try { const h = new URL(o).host; return h === (req.headers.get("host") || "") || h === new URL(req.url).host; } catch { return false; } };
 const hits = new Map();
-const limited = (req, key, max, ms) => { const ip = String(req.headers.get("x-nf-client-connection-ip") || req.headers.get("x-forwarded-for") || "?").split(",")[0].trim(); const k = key + "|" + ip, now = Date.now(); let h = hits.get(k); if (!h || now - h.t > ms) { h = { t: now, n: 0 }; hits.set(k, h); } h.n++; if (hits.size > 5000) for (const [kk, v] of hits) if (now - v.t > ms) hits.delete(kk); return h.n > max; };
+const limited = (req, key, max, ms) => { const ip = String((req.headers.get("cf-connecting-ip") || req.headers.get("x-nf-client-connection-ip")) || req.headers.get("x-forwarded-for") || "?").split(",")[0].trim(); const k = key + "|" + ip, now = Date.now(); let h = hits.get(k); if (!h || now - h.t > ms) { h = { t: now, n: 0 }; hits.set(k, h); } h.n++; if (hits.size > 5000) for (const [kk, v] of hits) if (now - v.t > ms) hits.delete(kk); return h.n > max; };
 
 const store = () => getStore("ouri");
 const COLS = new Set(["clips", "reactions", "votes", "pins", "pinclips", "chanclips", "board", "chatters", "profile", "stats", "emotes", "polls", "pollvotes"]);   // only these exist; anything else is rejected
