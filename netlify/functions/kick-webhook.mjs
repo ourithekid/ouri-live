@@ -70,7 +70,15 @@ async function bump(kind, name, add) {
   const all = Object.values(users).sort((a, b) => b.v - a.v);
   const keep = {}; all.slice(0, 300).forEach(u => { keep[u.name.toLowerCase()] = u; });
   const fmt = v => kind === "subs" ? v + (v === 1 ? " sub" : " subs") : v.toLocaleString("en-US") + " KICKs";
-  tot[kind] = { users: keep };
+  tot[kind] = Object.assign(tot[kind] || {}, { users: keep });
+  { // this week's board (resets Monday, Eastern)
+    const wk = etWk(), prev = tot[kind] && tot[kind].w && tot[kind].w.k === wk ? tot[kind].w.users : {}, wu = Object.assign({}, prev);
+    for (const r of ((board[kind + "W"] && board[kind + "W"].wk === wk && board[kind + "W"].rows) || [])) { const k2 = String(r.name).toLowerCase(); if (!wu[k2] || num(r.n) > wu[k2].v) wu[k2] = { name: r.name, v: num(r.n) }; }
+    wu[key] = { name: (wu[key] && wu[key].name) || name, v: ((wu[key] && wu[key].v) || 0) + add };
+    const wall = Object.values(wu).sort((a, b) => b.v - a.v), wkeep = {}; wall.slice(0, 200).forEach(u => { wkeep[u.name.toLowerCase()] = u; });
+    tot[kind].w = { k: wk, users: wkeep };
+    board[kind + "W"] = { wk, rows: wall.slice(0, 10).map(u => ({ name: u.name.slice(0, 40), n: fmt(u.v) })) };
+  }
   board[kind] = { rows: all.slice(0, 10).map(u => ({ name: u.name.slice(0, 40), n: fmt(u.v) })) };
   await s.setJSON("totals", tot); await s.setJSON("board", board);
 }
