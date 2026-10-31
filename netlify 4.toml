@@ -1,0 +1,18 @@
+[build]
+  publish = "."
+  functions = "netlify/functions"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    Strict-Transport-Security = "max-age=31536000"
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://platform.twitter.com https://cdn.syndication.twimg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com data:; img-src 'self' https: data: blob:; media-src 'self' https: blob: data:; connect-src 'self' wss://ws-us2.pusher.com https://api.coinbase.com https://api.coingecko.com https://syndication.twitter.com https://cdn.syndication.twimg.com https://platform.twitter.com; frame-src https://platform.twitter.com https://syndication.twitter.com https://twitter.com https://x.com https://player.kick.com https://kick.com https://www.youtube-nocookie.com https://www.youtube.com https://clips.twitch.tv https://player.twitch.tv https://www.twitch.tv https://streamable.com https://platform.twitter.com https://syndication.twitter.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Cache-Control = "no-cache"
