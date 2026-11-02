@@ -1,0 +1,166 @@
+import { getStore } from "@netlify/blobs";
+import crypto from "node:crypto";
+import { ddCommand, kickCredit, kickLinkTry, SUB_CREDIT, KICK_CREDIT } from "./ovlib.mjs";
+export const config = { path: "/api/kick-webhook" };
+
+const pub = () => getStore("ouri");            // site data (leaderboards are public)
+const priv = () => getStore("ouri-private");   // never exposed by /api/db
+const J = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+const eqSafe = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); };
+const num = s => { const m = String(s || "").replace(/,/g, "").match(/\d+(\.\d+)?/); return m ? parseFloat(m[0]) : 0; };
+
+// RSA-SHA256 signature check with WebCrypto (Cloudflare Workers has no crypto.createVerify)
+const b64 = t => Uint8Array.from(atob(String(t).replace(/\s+/g, "")), c => c.charCodeAt(0));
+const derLen = n => n < 128 ? [n] : n < 256 ? [0x81, n] : [0x82, n >> 8, n & 255];
+const der = (tag, body) => Uint8Array.from([tag, ...derLen(body.length), ...body]);
+function toSpki(pem) {
+  const raw = b64(String(pem).replace(/-----[^-]+-----/g, ""));
+  if (!/RSA PUBLIC KEY/.test(pem)) return raw;                        // already SubjectPublicKeyInfo
+  const algo = Uint8Array.from([0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00]);
+  return der(0x30, [...algo, ...der(0x03, [0, ...raw])]);
+}
+async function rsaVerify(msg, sigB64, pem) {
+  const key = await globalThis.crypto.subtle.importKey("spki", toSpki(pem), { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
+  return globalThis.crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, b64(sigB64), new TextEncoder().encode(msg));
+}
+
+let keyPem = null;
+async function publicKey() {
+  if (keyPem) return keyPem;
+  const r = await fetch("https://api.kick.com/public/v1/public-key");
+  if (!r.ok) throw new Error("public-key " + r.status);
+  const j = await r.json();
+  keyPem = (j.data && j.data.public_key) || j.public_key;
+  if (!keyPem) throw new Error("no public key");
+  return keyPem;
+}
+
+// count one chat message and keep the Top 5 chatters (strong reads so quick messages don't overwrite each other)
+const IGNORE = new Set(["botrix", "kickbot", "nightbot", "streamelements", "moobot", "buttbot"]);
+const isBot = n => IGNORE.has(String(n || "").toLowerCase().replace(/[^a-z0-9]/g, ""));
+
+const etDay = () => new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+const etWk = () => { const d = new Date(etDay() + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); };
+const etMo = () => etDay().slice(0, 7);
+const bump1 = (cc, key, name, wk, mo) => { const x = cc[key] || (cc[key] = { name, v: 0 }); x.name = x.name || name; x.v = (x.v || 0) + 1; if (!x.w || x.w.k !== wk) x.w = { k: wk, v: 0 }; x.w.v++; if (!x.m || x.m.k !== mo) x.m = { k: mo, v: 0 }; x.m.v++; };
+const rowsOf = (cc, f, pick) => Object.values(cc).map(u => ({ u, v: pick(u) })).filter(x => x.v > 0).sort((a, b) => b.v - a.v).slice(0, 10).map(x => ({ name: x.u.name.slice(0, 40), n: x.v.toLocaleString("en-US") + (x.v === 1 ? " msg" : " msgs") }));
+const publish = async (cc, n, via) => {
+  const wk = etWk(), mo = etMo(), pubS = getStore({ name: "ouri", consistency: "strong" }), m = (await pubS.get("chatters", { type: "json" })) || {};
+  m.top = { rows: rowsOf(cc, 0, u => u.v) }; m.topW = { wk, rows: rowsOf(cc, 0, u => u.w && u.w.k === wk ? u.w.v : 0) }; m.topM = { mk: mo, rows: rowsOf(cc, 0, u => u.m && u.m.k === mo ? u.m.v : 0) };
+  m.meta = { last: new Date().toISOString(), n: ((m.meta && m.meta.n) || 0) + n, via };
+  await pubS.setJSON("chatters", m);
+};
+async function chatCount(name, broadcaster) {
+  if (!name) return;
+  const key = String(name).toLowerCase();
+  if (isBot(key) || key === String(broadcaster || "").toLowerCase()) return;
+  const ps = getStore({ name: "ouri-private", consistency: "strong" });
+  const cc = (await ps.get("chatcounts", { type: "json" })) || {};
+  for (const k of Object.keys(cc)) if (isBot(k)) delete cc[k];
+  bump1(cc, key, name, etWk(), etMo());
+  let all = Object.values(cc).sort((a, b) => b.v - a.v), keep = cc;
+  if (all.length > 400) { keep = {}; all.slice(0, 400).forEach(u => { keep[u.name.toLowerCase()] = u; }); }
+  await ps.setJSON("chatcounts", keep);
+  await publish(keep, 1, "kick-webhook");
+}
+
+async function log(entry) {
+  try {
+    const p = priv(); const l = (await p.get("log", { type: "json" })) || [];
+    l.unshift({ t: new Date().toISOString(), ...entry }); await p.setJSON("log", l.slice(0, 25));
+  } catch {}
+}
+
+// add `add` to a person's running total and rebuild the Top 10 board
+async function bump(kind, name, add) {
+  if (!name || !(add > 0)) return;
+  const s = pub();
+  const tot = (await s.get("totals", { type: "json" })) || {};
+  const board = (await s.get("board", { type: "json" })) || {};
+  const users = (tot[kind] && tot[kind].users) || {};
+  for (const r of ((board[kind] && board[kind].rows) || [])) {      // manual edits on the site win
+    const k = String(r.name).toLowerCase(); users[k] = { name: r.name, v: num(r.n) };
+  }
+  const key = String(name).toLowerCase();
+  users[key] = { name: (users[key] && users[key].name) || name, v: ((users[key] && users[key].v) || 0) + add };
+  const all = Object.values(users).sort((a, b) => b.v - a.v);
+  const keep = {}; all.slice(0, 300).forEach(u => { keep[u.name.toLowerCase()] = u; });
+  const fmt = v => kind === "subs" ? v + (v === 1 ? " sub" : " subs") : v.toLocaleString("en-US") + " KICKs";
+  tot[kind] = Object.assign(tot[kind] || {}, { users: keep });
+  { // this week's board (resets Monday, Eastern)
+    const wk = etWk(), prev = tot[kind] && tot[kind].w && tot[kind].w.k === wk ? tot[kind].w.users : {}, wu = Object.assign({}, prev);
+    for (const r of ((board[kind + "W"] && board[kind + "W"].wk === wk && board[kind + "W"].rows) || [])) { const k2 = String(r.name).toLowerCase(); if (!wu[k2] || num(r.n) > wu[k2].v) wu[k2] = { name: r.name, v: num(r.n) }; }
+    wu[key] = { name: (wu[key] && wu[key].name) || name, v: ((wu[key] && wu[key].v) || 0) + add };
+    const wall = Object.values(wu).sort((a, b) => b.v - a.v), wkeep = {}; wall.slice(0, 200).forEach(u => { wkeep[u.name.toLowerCase()] = u; });
+    tot[kind].w = { k: wk, users: wkeep };
+    board[kind + "W"] = { wk, rows: wall.slice(0, 10).map(u => ({ name: u.name.slice(0, 40), n: fmt(u.v) })) };
+  }
+  board[kind] = { rows: all.slice(0, 10).map(u => ({ name: u.name.slice(0, 40), n: fmt(u.v) })) };
+  await s.setJSON("totals", tot); await s.setJSON("board", board);
+}
+
+export default async (req) => {
+  const url = new URL(req.url);
+  if (req.method === "GET") {                                       // owner-only debug view
+    if (!process.env.OWNER_KEY || !eqSafe(url.searchParams.get("debug") || "", process.env.OWNER_KEY)) return J({ ok: true, hint: "kick webhook endpoint" });
+    return J({ chat: ((await pub().get("chatters", { type: "json" })) || {}).meta || "no chat events counted yet", log: (await priv().get("log", { type: "json" })) || [], auth: (await priv().get("auth", { type: "json" })) ? "connected" : "not connected" });
+  }
+  if (req.method !== "POST") return J({ error: "method" }, 405);
+
+  const raw = await req.text();
+  const id = req.headers.get("kick-event-message-id") || "";
+  const ts = req.headers.get("kick-event-message-timestamp") || "";
+  const sig = req.headers.get("kick-event-signature") || "";
+  const type = req.headers.get("kick-event-type") || "";
+
+  const tms = Date.parse(ts); if (!isFinite(tms) || Math.abs(Date.now() - tms) > 3600000) return J({ error: "stale" }, 401);   // reject replayed old requests
+  let ok = false;
+  try { ok = await rsaVerify(id + "." + ts + "." + raw, sig, await publicKey()); } catch (e) { await log({ type, verified: false, note: "verify error: " + e.message }); return J({ error: "verify" }, 401); }
+  if (!ok) { await log({ type, verified: false, note: "bad signature" }); return J({ error: "signature" }, 401); }
+
+  if (type === "chat.message.sent") {                              // no dedupe/log here: this fires on every chat message
+    try { const cb = JSON.parse(raw), sn = String((cb.sender || {}).username || (cb.sender || {}).channel_slug || "").toLowerCase(), bn = String((cb.broadcaster || {}).username || (cb.broadcaster || {}).channel_slug || "").toLowerCase();
+      if (sn && sn === bn && /^!(doordash|dd)\b/i.test(String(cb.content || "").trim())) await ddCommand(String(cb.content).slice(0, 60), cb.message_id || id);   // only Ouri himself can run !doordash
+    } catch (e) { await log({ type, verified: true, note: "doordash error: " + e.message }); }
+    try { const cb = JSON.parse(raw); if (/^!link\b/i.test(String(cb.content || "").trim())) await kickLinkTry((cb.sender || {}).username || (cb.sender || {}).channel_slug, String(cb.content).slice(0, 40)); } catch (e) { await log({ type, verified: true, note: "link error: " + e.message }); }
+    try { const cb = JSON.parse(raw); await chatCount((cb.sender || {}).username || (cb.sender || {}).channel_slug, (cb.broadcaster || {}).username || (cb.broadcaster || {}).channel_slug); }
+    catch (e) { await log({ type, verified: true, note: "chat count error: " + e.message }); }
+    return J({ ok: true });
+  }
+
+  const p = priv();
+  const seen = (await p.get("seen", { type: "json" })) || [];
+  if (id && seen.includes(id)) return J({ ok: true, dup: true });
+  seen.unshift(id); await p.setJSON("seen", seen.slice(0, 300));
+
+  let b; try { b = JSON.parse(raw); } catch { return J({ error: "json" }, 400); }
+  try {
+    if (type === "channel.subscription.gifts") {
+      const g = b.gifter || {};
+      const gn = Array.isArray(b.giftees) && b.giftees.length ? b.giftees.length : 1;
+      if (!g.is_anonymous && g.username) { await bump("subs", g.username, gn); await kickCredit(g.username, gn * SUB_CREDIT); }
+      await log({ type, verified: true, note: (g.is_anonymous ? "anonymous" : g.username) + " x" + gn + (g.is_anonymous ? "" : " = " + gn * SUB_CREDIT + " sound credits") });
+    } else if (type === "channel.subscription.renewal" || type === "channel.subscription.new") {
+      const sb = b.subscriber || {};
+      if (sb.username) await kickCredit(sb.username, SUB_CREDIT);
+      await log({ type, verified: true, note: sb.username + " sub/resub = " + SUB_CREDIT + " sound credits" });
+    } else if (type === "kicks.gifted") {
+      const sd = b.sender || {}, amt = Number((b.gift || {}).amount || 0);
+      await bump("kicks", sd.username, amt); await kickCredit(sd.username, amt * KICK_CREDIT);
+      await log({ type, verified: true, note: sd.username + " " + amt });
+    } else if (type === "livestream.status.updated") {
+      // stream ended -> add a "waiting for a link" entry in the VODS tab (owner attaches the Kick VOD link later)
+      if (b.is_live === false) {
+        const ps = getStore({ name: "ouri-private", consistency: "strong" });
+        const list = (await ps.get("vods", { type: "json" })) || [];
+        const ended = b.ended_at || new Date().toISOString();
+        if (!list.some(v => v.ended === ended)) {
+          list.push({ id: Date.now().toString(36) + crypto.randomBytes(2).toString("hex"), title: String(b.title || "Stream").replace(/[<>]/g, "").slice(0, 100), pub: false, created: Date.now(), started: b.started_at || null, ended });
+          await ps.setJSON("vods", list.slice(-100));
+        }
+      }
+      await log({ type, verified: true, note: b.is_live === false ? "stream ended -> VOD draft" : "stream started" });
+    } else await log({ type, verified: true, note: "ignored" });
+  } catch (e) { await log({ type, verified: true, note: "error: " + e.message }); }
+  return J({ ok: true });
+};
