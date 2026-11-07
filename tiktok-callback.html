@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
+<title>Link TikTok</title>
+<style>
+:root{color-scheme:dark}
+body{margin:0;background:#070d12;color:#fff;font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:grid;place-items:center;min-height:100vh;padding:16px;box-sizing:border-box}
+main{width:min(460px,100%);background:#0f1a22;border:1px solid #1f3442;border-radius:18px;padding:1.3rem}
+h1{font-size:1.25rem;margin:0 0 .6rem}
+p{margin:.5rem 0;color:#c9d8e0}
+input,textarea{width:100%;box-sizing:border-box;font:inherit;color:#fff;background:#070d12;border:1px solid #2a4556;border-radius:10px;padding:.7rem;margin:.4rem 0}
+button{font:700 1rem system-ui,sans-serif;color:#041016;background:#35c9ff;border:0;border-radius:999px;padding:.75rem 1.4rem;cursor:pointer;margin-top:.4rem}
+code{word-break:break-all}
+.ok{color:#7dffa0}.err{color:#ff8a8a}
+</style></head><body><main id="m"></main>
+<script>
+(function(){
+var m=document.getElementById("m"),q=new URLSearchParams(location.search),base=location.origin+location.pathname;
+function esc(t){return String(t).replace(/[&<>"']/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]})}
+if(q.get("code")){
+ var code=q.get("code");
+ m.innerHTML='<h1 class="ok">TikTok said yes</h1><p>Copy this code. In GitHub run <b>Ouri Shorts</b> with action <code>tiktok-login</code> and paste it in the <code>tt_code</code> box. It works once and expires in a few minutes.</p><textarea id="c" rows="4" readonly>'+esc(code)+'</textarea><button id="b" type="button">Copy code</button><p id="s"></p>';
+ document.getElementById("b").onclick=function(){var t=document.getElementById("c");t.select();try{navigator.clipboard.writeText(t.value);document.getElementById("s").textContent="Copied."}catch(e){document.execCommand("copy");document.getElementById("s").textContent="Copied."}};
+}else if(q.get("error")){
+ m.innerHTML='<h1 class="err">TikTok did not link</h1><p>'+esc(q.get("error_description")||q.get("error"))+'</p><p><a href="'+esc(base)+'" style="color:#35c9ff">Try again</a></p>';
+}else{
+ m.innerHTML='<h1>Link TikTok to Ouri Shorts</h1><p>Paste your TikTok app <b>Client key</b> (not the secret), then tap Connect and approve it with the clips TikTok account.</p><input id="k" placeholder="Client key" autocomplete="off" autocapitalize="off" spellcheck="false"><button id="g" type="button">Connect TikTok</button><p>Redirect address to register in the TikTok app: <code>'+esc(base)+'</code></p>';
+ document.getElementById("g").onclick=function(){var k=document.getElementById("k").value.trim();if(!k)return;
+  location.href="https://www.tiktok.com/v2/auth/authorize/?client_key="+encodeURIComponent(k)+"&scope="+encodeURIComponent("user.info.basic,video.upload,video.publish")+"&response_type=code&redirect_uri="+encodeURIComponent(base)+"&state=ouri"};
+}
+})();
+</script></body></html>
